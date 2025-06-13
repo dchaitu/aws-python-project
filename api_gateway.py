@@ -2,14 +2,27 @@ import boto3
 import json
 from typing import Optional, Dict, Any
 
+from api_resource import APIResource
+
 
 class APIGateway:
+    """
+    A class to manage AWS API Gateway resources.
+    Handles creation and management of REST APIs and their resources.
+    """
 
-    # Create an API Gateway with resources with connect with dynamoDB
     def __init__(self, region="us-east-1") -> None:
+        """
+        Initialize the APIGateway client.
+
+        Args:
+            region: AWS region to use for API Gateway
+        """
         self.region = region
         self.apigateway = boto3.client("apigateway", region_name=region)
         self.iam = boto3.client("iam", region_name=region)
+        self.api_id = None
+        self.resources = {}  # Cache of resource_id -> APIResource
 
     def create_gateway_role_with_policy(self, role_name="api_gateway_role"):
         trust_policy = {
@@ -51,11 +64,11 @@ class APIGateway:
         print(f"Created role {role_name}")
         return role["Role"]["Arn"]
 
-    def create_api(
-        self, name: str, description: str = "API Gateway for job portal"
+    def create_rest_api_gateway(
+        self, name, description="Created using API Gateway CLI"
     ) -> Dict[str, Any]:
         """
-        Create a new API Gateway
+        Create a new REST API Gateway.
 
         Args:
             name: Name of the API Gateway
@@ -72,92 +85,109 @@ class APIGateway:
             )
             self.api_id = response["id"]
             print(f"Created API Gateway: {name} (ID: {self.api_id})")
+
+            # Initialize the root resource
+            self._init_root_resource()
             return response
+
         except Exception as e:
             print(f"Failed to create API Gateway: {str(e)}")
             raise
 
-    def get_root_resource_id(self) -> str:
-        """Get the root resource ID of the API Gateway"""
-        try:
-            resources = self.apigateway.get_resources(restApiId=self.api_id)
-            return resources["items"][0]["id"]
-        except Exception as e:
-            print(f"Failed to get root resource ID: {str(e)}")
-            raise
+    def _init_root_resource(self) -> None:
+        """Initialize the root resource for the API."""
+        if not self.api_id:
+            raise ValueError(
+                "API Gateway not created. Call create_rest_api_gateway first."
+            )
+
+        resources = self.apigateway.get_resources(restApiId=self.api_id)
+        root_resource = resources["items"][0]
+        self.root_resource = APIResource(
+            self.apigateway, self.api_id, root_resource["id"], "/"
+        )
+        self.resources[root_resource["id"]] = self.root_resource
+
+    def get_api_gateway(self) -> Dict[str, Any]:
+        """
+        Get the API Gateway details.
+
+        Returns:
+            dict: API Gateway details
+        """
+        if not self.api_id:
+            raise ValueError(
+                "API Gateway not created. Call create_rest_api_gateway first."
+            )
+        return self.apigateway.get_rest_api(restApiId=self.api_id)
+
+    def get_root_resource(self) -> "APIResource":
+        """
+        Get the root resource of the API.
+
+        Returns:
+            APIResource: The root resource
+        """
+        if not hasattr(self, "root_resource"):
+            self._init_root_resource()
+        return self.root_resource
 
     def create_resource(
-        self, parent_id: str, path_part: str, **kwargs
-    ) -> Dict[str, Any]:
+        self, parent: "APIResource", path_part, **kwargs
+    ) -> "APIResource":
         """
-        Create a new resource in API Gateway
+        Create a new resource under the specified parent.
 
         Args:
-            parent_id: ID of the parent resource
+            parent: Parent APIResource object
             path_part: Path part for the resource (can include {param} for path parameters)
             **kwargs: Additional parameters for create_resource
 
         Returns:
-            dict: Resource creation response
+            APIResource: The created resource
         """
+        if not self.api_id:
+            raise ValueError(
+                "API Gateway not created. Call create_rest_api_gateway first."
+            )
+
         try:
             response = self.apigateway.create_resource(
-                restApiId=self.api_id, parentId=parent_id, pathPart=path_part, **kwargs
+                restApiId=self.api_id,
+                parentId=parent.resource_id,
+                pathPart=path_part,
+                **kwargs,
             )
-            print(f"Created resource: {path_part} under parent {parent_id}")
-            return response
+
+            # Build the full path
+            full_path = (
+                f"{parent.path.rstrip('/')}/{path_part}"
+                if parent.path != "/"
+                else f"/{path_part}"
+            )
+
+            # Create and cache the new resource
+            resource = APIResource(
+                self.apigateway, self.api_id, response["id"], full_path
+            )
+            self.resources[response["id"]] = resource
+
+            print(f"Created resource: {full_path}")
+            return resource
+
         except Exception as e:
             print(f"Failed to create resource {path_part}: {str(e)}")
             raise
 
-    def add_method(
-        self,
-        resource_id: str,
-        http_method: str,
-        authorization_type: str = "NONE",
-        request_parameters: Optional[Dict[str, bool]] = None,
-        **kwargs,
-    ) -> Dict[str, Any]:
-        """
-        Add a method to a resource
-
-        Args:
-            resource_id: ID of the resource
-            http_method: HTTP method (GET, POST, etc.)
-            authorization_type: Type of authorization (NONE, AWS_IAM, etc.)
-            request_parameters: Request parameters mapping
-            **kwargs: Additional parameters for put_method
-
-        Returns:
-            dict: Method creation response
-        """
-        if request_parameters is None:
-            request_parameters = {}
-
-        try:
-            response = self.apigateway.put_method(
-                restApiId=self.api_id,
-                resourceId=resource_id,
-                httpMethod=http_method.upper(),
-                authorizationType=authorization_type,
-                requestParameters=request_parameters,
-                **kwargs,
-            )
-            print(f"Added {http_method} method to resource {resource_id}")
-            return response
-        except Exception as e:
-            print(f"Failed to add {http_method} method: {str(e)}")
-            raise
-
     def deploy_to_stage(
         self,
-        stage_name: str,
-        stage_description: str = "",
-        description: str = "Deployment",
+        stage_name,
+        stage_description="",
+        description="Deployment",
         **kwargs,
     ) -> Dict[str, Any]:
         """
-        Deploy the API to a stage
+        Deploy the API to a stage.
 
         Args:
             stage_name: Name of the stage to deploy to (e.g., 'dev', 'prod')
@@ -168,21 +198,25 @@ class APIGateway:
         Returns:
             dict: Deployment response with deployment and stage information
         """
+        if not self.api_id:
+            raise ValueError(
+                "API Gateway not created. Call create_rest_api_gateway first."
+            )
+
         try:
             # Create deployment
             deployment = self.apigateway.create_deployment(
                 restApiId=self.api_id, description=description, **kwargs
             )
 
-            # Create or update stage
-            #  If stage exists, update it
-            #  If stage does not exist, create it
             # Check if stage exists
-            response = self.apigateway.get_stages(restApiId=self.api_id)
-            stages = response["item"]
-            stage_exists = any(stage["stageName"] == stage_name for stage in stages)
-            if stage_exists:
-                # Stage exists, update it
+            try:
+                # Try to get the stage
+                stage = self.apigateway.get_stage(
+                    restApiId=self.api_id, stageName=stage_name
+                )
+
+                # If we get here, stage exists - update it
                 stage = self.apigateway.update_stage(
                     restApiId=self.api_id,
                     stageName=stage_name,
@@ -195,70 +229,106 @@ class APIGateway:
                     ],
                 )
                 print(f"Updated existing stage: {stage_name}")
-            else:
-                # Stage does not exist, create it
+
+            except self.apigateway.exceptions.NotFoundException:
+                # Stage doesn't exist - create it
                 stage = self.apigateway.create_stage(
                     restApiId=self.api_id,
                     stageName=stage_name,
-                    description=stage_description,
                     deploymentId=deployment["id"],
+                    description=stage_description,
                 )
                 print(f"Created new stage: {stage_name}")
 
             print(f"Successfully deployed to stage: {stage_name}")
-            return {"deployment": deployment, "stage": stage}
+            return {
+                "deployment": deployment,
+                "stage": stage,
+                "url": f"https://{self.api_id}.execute-api.{self.region}.amazonaws.com/{stage_name}",
+            }
 
         except Exception as e:
             print(f"Failed to deploy API: {str(e)}")
             raise
 
+    def get_resources(self, restApiId):
+        return self.apigateway.get_resources(restApiId=restApiId)
+
 
 if __name__ == "__main__":
-    # Initialize the API Gateway client
-
-    api_name = input("Enter API name: ")
-    api_description = input("Enter API description: ")
-    stage_name = input("Enter stage name: ")
-    stage_description = input("Enter stage description: ")
-    region = input("Enter region (default: us-east-1): ")
-
-    # if region is empty use us-east-1
-    if region == "":
+    # Example usage of the refactored API Gateway client
+    try:
+        # Configuration
+        api_name = "job-portal-api-3"
+        api_description = "API for Job Portal Application"
+        stage_name = "dev"
         region = "us-east-1"
-    api_gateway = APIGateway(region=region)
-    api_response = api_gateway.create_api(api_name, api_description)
-    root_id = api_gateway.get_root_resource_id()
-    print(f"API created: {api_response['id']}")
 
-    # Create a resource with static name
-    resource_name = input("Enter resource name: ")
-    jobs_resource = api_gateway.create_resource(
-        parent_id=root_id, path_part=resource_name
-    )
+        # Initialize the API Gateway client
+        print(f"Initializing API Gateway in {region}...")
+        api_gateway = APIGateway(region=region)
 
-    # Create a resource with dynamic path parameter
-    # job_resource = api_gateway.create_resource(
-    #     parent_id=jobs_resource['id'],
-    #     path_part="{jobId}"
-    # )
+        # Create a new REST API
+        print(f"Creating API: {api_name}")
+        api_gateway.create_rest_api_gateway(api_name, api_description)
 
-    # Add methods to resources
-    method_name = input("Enter method name: ")
-    api_gateway.add_method(
-        resource_id=jobs_resource["id"],
-        http_method=method_name,
-        authorization_type="NONE",
-    )
+        # Get the root resource
+        root_resource = api_gateway.get_root_resource()
 
-    # Deploy the API
-    deployment = api_gateway.deploy_to_stage(
-        stage_name=stage_name,
-        stage_description=stage_description,
-        description="Initial deployment",
-    )
+        # Create a resource for jobs
+        print("Creating 'jobs' resource...")
+        jobs_resource = api_gateway.create_resource(root_resource, "tasks")
 
-    print(f"API deployed successfully!")
-    print(f"API ID: {api_gateway.api_id}")
-    print(
-        f"Stage URL: https://{api_gateway.api_id}.execute-api.{api_gateway.region}.amazonaws.com/dev"
-    )
+        # Add GET method to jobs resource with MOCK integration
+        print("Adding GET method to 'tasks' resource with MOCK integration...")
+        jobs_resource.add_method("GET")
+        jobs_resource.add_integration(
+            http_method="GET",
+            integration_type="MOCK",
+            request_templates={"application/json": '{"statusCode": 200}'},
+        )
+
+        # Example: Add a dynamic resource for a specific job
+        print("Creating dynamic 'tasks/{taskId}' resource...")
+        job_resource = api_gateway.create_resource(jobs_resource, "{taskId}")
+
+        # Add GET method to the dynamic job resource with MOCK integration
+        print("Adding GET method to 'tasks/{taskId}' resource with MOCK integration...")
+        job_resource.add_method("GET")
+        job_resource.add_integration(
+            http_method="GET",
+            integration_type="MOCK",
+            request_templates={
+                "application/json": '{"statusCode": 200, "jobId": "$input.params(\'taskId\')"}'
+            },
+        )
+
+        # Example: Add a POST method to jobs resource with MOCK integration
+        print("Adding POST method to 'jobs' resource with MOCK integration...")
+        jobs_resource.add_method(
+            "POST", request_parameters={"method.request.header.Content-Type": True}
+        )
+        jobs_resource.add_integration(
+            http_method="POST",
+            integration_type="MOCK",
+            requestTemplates={
+                "application/json": '{"statusCode": 200, "message": "Job created successfully"}'
+            },
+            passthrough_behavior="WHEN_NO_MATCH",
+        )
+
+        # Deploy the API
+        print(f"Deploying API to stage: {stage_name}")
+        deployment = api_gateway.deploy_to_stage(
+            stage_name=stage_name, description="Initial deployment"
+        )
+
+        # Print deployment information
+        print("\n--- Deployment Successful ---")
+        print(f"API ID: {api_gateway.api_id}")
+        print(f"Stage: {stage_name}")
+        print(f"API URL: {deployment['url']}")
+        print(f"Jobs Endpoint: {deployment['url'].rstrip('/')}/tasks")
+
+    except Exception as e:
+        print(f"An error occurred: {str(e)}")
