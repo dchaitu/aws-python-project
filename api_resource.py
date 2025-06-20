@@ -60,6 +60,11 @@ class APIResource:
             raise
 
     def create_resource(self, path_part, **kwargs):
+        self.apigateway.get_resources(
+            restApiId=self.api_id,
+            parentId=self.resource_id,
+        )
+
         return self.apigateway.create_resource(
             restApiId=self.api_id,
             parentId=self.resource_id,
@@ -111,24 +116,25 @@ class APIResource:
             if credentials:
                 params["credentials"] = credentials
 
-            valid_params = {
-                "connectionType",
-                "connectionId",
-                "credentials",
-                "requestParameters",
-                "requestTemplates",
-                "passthroughBehavior",
-                "cacheNamespace",
-                "cacheKeyParameters",
-                "contentHandling",
-                "timeoutInMillis",
-                "tlsConfig",
+            snake_to_camel = {
+                "connection_type": "connectionType",
+                "connection_id": "connectionId",
+                "request_parameters": "requestParameters",
+                "request_templates": "requestTemplates",
+                "passthrough_behavior": "passthroughBehavior",
+                "cache_namespace": "cacheNamespace",
+                "cache_key_parameters": "cacheKeyParameters",
+                "content_handling": "contentHandling",
+                "timeout_in_millis": "timeoutInMillis",
+                "tls_config": "tlsConfig",
             }
 
+            valid_params = set(snake_to_camel.values())
             # Only add kwargs that are valid API Gateway parameters
             for key, value in kwargs.items():
-                if key in valid_params:
-                    params[key] = value
+                camel_key = snake_to_camel.get(key, key)
+                if camel_key in valid_params:
+                    params[camel_key] = value
                 else:
                     print(
                         f"Warning: Ignoring invalid parameter '{key}' for put_integration"

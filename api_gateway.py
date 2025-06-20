@@ -94,6 +94,19 @@ class APIGateway:
             print(f"Failed to create API Gateway: {str(e)}")
             raise
 
+    def get_api_gateway(self, api_gateway_id):
+        """
+        Get an existing API Gateway by id.
+
+        Args:
+            api_gateway_id: ID of the API Gateway to find
+
+        Returns:
+            self if found, None otherwise
+        """
+        self.api_id = self.apigateway.get_rest_api(restApiId=api_gateway_id)["id"]
+        return self
+
     def _init_root_resource(self) -> None:
         """Initialize the root resource for the API."""
         if not self.api_id:
@@ -102,13 +115,25 @@ class APIGateway:
             )
 
         resources = self.apigateway.get_resources(restApiId=self.api_id)
-        root_resource = resources["items"][0]
+
+        # Find the root resource (the one with path "/")
+        root_resource = None
+        for resource in resources["items"]:
+            if resource["path"] == "/":
+                root_resource = resource
+                break
+
+        if not root_resource:
+            raise ValueError(
+                "Root resource (path='/') not found in API Gateway resources"
+            )
+
         self.root_resource = APIResource(
             self.apigateway, self.api_id, root_resource["id"], "/"
         )
         self.resources[root_resource["id"]] = self.root_resource
 
-    def get_api_gateway(self) -> Dict[str, Any]:
+    def get_api_details(self) -> Dict[str, Any]:
         """
         Get the API Gateway details.
 
@@ -137,6 +162,7 @@ class APIGateway:
     ) -> "APIResource":
         """
         Create a new resource under the specified parent.
+        If a resource with the same path part already exists under the parent, returns the existing resource.
 
         Args:
             parent: Parent APIResource object
@@ -144,14 +170,26 @@ class APIGateway:
             **kwargs: Additional parameters for create_resource
 
         Returns:
-            APIResource: The created resource
+            APIResource: The created or existing resource
         """
         if not self.api_id:
             raise ValueError(
                 "API Gateway not created. Call create_rest_api_gateway first."
             )
 
+        # First, check if resource already exists
         try:
+            resources = self.apigateway.get_resources(restApiId=self.api_id, limit=500)
+            for item in resources.get("items", []):
+                if (
+                    item.get("parentId") == parent.resource_id
+                    and item.get("pathPart") == path_part
+                ):
+                    return APIResource(
+                        self.apigateway, self.api_id, item["id"], item.get("path", "")
+                    )
+
+            # If we get here, resource doesn't exist, so create it
             response = self.apigateway.create_resource(
                 restApiId=self.api_id,
                 parentId=parent.resource_id,
@@ -253,6 +291,16 @@ class APIGateway:
 
     def get_resources(self, restApiId):
         return self.apigateway.get_resources(restApiId=restApiId)
+
+    def get_resource(self, restApiId, resourceId):
+        response = self.apigateway.get_resource(restApiId=restApiId, resourceId=resourceId)
+        # Create and return an APIResource object
+        return APIResource(
+            self.apigateway,
+            restApiId,
+            response["id"],
+            response["path"]
+        )
 
 
 if __name__ == "__main__":
